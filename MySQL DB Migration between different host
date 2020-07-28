@@ -1,0 +1,262 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Sep 16 13:33:27 2019
+
+@author: Chandrapal Panwar
+"""
+
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Aug 23 13:14:18 2019
+
+@author: Chandrapal Panwar
+"""
+
+import os
+import time
+import getpass
+import MySQLdb
+import glob
+import sys
+
+
+def get_dump(db,host):
+    filestamp=time.strftime('%Y-%m-%d-%I')
+    file=""+db+"_"+filestamp+".sql.gz"
+    if os.path.exists(file):
+        os.remove(file)
+    os.popen("mysqldump --verbose --flush-logs --single-transaction --master-data=2 -u %s -p%s -h %s -P %s -e --opt -c %s | gzip -c > %s.sql.gz" % ('user','passwd',host,'3306',db,db+"_"+filestamp))
+    print "\n-- please have a the dump file in "+db+"_"+filestamp+".sql.gz --"
+    var=""+db+"_"+filestamp+".sql.gz"
+    return (var)
+
+def get_user_sql(db,host):
+
+    conn = MySQLdb.connect(host=host,user='user',passwd='passwd',db='mysql')
+    cur = conn.cursor()
+    query = "select distinct U.user,U.password from user U,db D where U.user=D.user and D.db='{}';".format(db)
+    cur.execute(query)
+    no_of_rows = cur.fetchone()
+    file="create_"+db+"_user.sql"
+    if os.path.exists(file):
+        os.remove(file)
+    if no_of_rows is None:
+        print "Either db name provided is incorrect or database has no user.\n Create user manually for "+db+" database."
+        return ('')
+    else:
+        if env in ('qa'):
+            query="select distinct U.user,U.password from user U,db D where U.user=D.user and D.db='{}' and U.host in ('%');".format(db)
+            cur.execute(query)
+            host='%'
+            file="create_"+db+"_user.sql"
+            with open(file, 'w') as f:
+                for row in cur:
+                    f.write("CREATE USER '{0}'@'{2}' IDENTIFIED BY password '{1}';".format(row[0], row[1],host))
+                    f.write("\nGRANT usage ON *.* TO '{0}'@'{1}';".format(row[0],host))
+                    f.write("\ngrant all privileges on `{0}`.* TO '{1}'@'%';".format(db,row[0]))
+                    f.write("\nupdate mysql.user set max_user_connections=70 where User='{0}';".format(row[0]))
+                    f.write("\nflush privileges;")
+                    f.write("\n")
+        elif env in ('prod'):
+            query="select distinct U.user,U.password from user U,db D where U.user=D.user and D.db='{}' and U.host in ('%');".format(db)
+            cur.execute(query)
+            host='%'
+            file="create_"+db+"_user.sql"
+            with open(file, 'w') as f:
+                for row in cur:
+                    f.write("CREATE USER '{0}'@'{2}' IDENTIFIED BY password '{1}';".format(row[0], row[1],host))
+                    f.write("\nGRANT usage ON *.* TO '{0}'@'{1}';".format(row[0],host))
+                    f.write("\ngrant all privileges on `{0}`.* TO '{1}'@'%';".format(db,row[0]))
+                    f.write("\nupdate mysql.user set max_user_connections=70 where User='{0}';".format(row[0]))
+                    f.write("\nflush privileges;")
+                    f.write("\n")
+    cur.close()
+    conn.close()
+    print "\n-- Create user sql file name create_"+db+"_user.sql "
+    user_sql="create_"+db+"_user.sql"
+    return(user_sql)
+
+def import_dump(db,dumpfile,host):
+    conn = MySQLdb.connect(host=host,user='user',passwd='passwd',port=3311)
+    cur = conn.cursor()
+    query = "create database {};".format(db)
+    try:
+        result=cur.execute(query)
+        if result==1:
+            print"database got created {}".format(db)
+    except MySQLdb.Error,e:
+        print "Database alread exist Error:%d:%s" % (e.args[0], e.args[1])
+        print "Droping and recreating it on 5.7 MySQL instance for migration process"
+        drop="drop database {}".format(db)
+        cur.execute(drop)
+        result=cur.execute(query)
+    cur.close()
+    conn.close()
+    print "Import started for database {}".format(db)
+    os.popen("gunzip %s" % (dumpfile))
+    dumpfile=max(glob.iglob('*.sql'),key=os.path.getctime)
+    print "Import will be start for database ",db," on host : " +host+ "  with dumpfile ",dumpfile
+    response=raw_input("Incase import need to start enter Y and for abort entry N:" ).lower()
+    print "You have enter : " ,response
+    if response in ['y','yes']:
+        print("Starting import")
+        os.popen("mysql -u %s -p%s -h %s -P %s  %s < %s" % ('user','passwd',host,'3311',db,dumpfile))
+        print "Import completed"
+    else:
+        print "exiting the program with skipping import"
+        exit()
+
+
+
+def user_creation(file,host):
+    conn = MySQLdb.connect(host=host,user='user',passwd='passwd',port=3311)
+    cur = conn.cursor()
+    if os.path.exists(file):
+        for line in open(file):
+            cur.execute(line)
+            print ("Executed command in MySQL instance " +host+ "",line )
+            print "User creation completed"
+    else:
+        print "User creation sql file doesn't exist.Try to create with manual process or run again user creation sql step."
+    cur.close()
+    conn.close()
+
+def user_manual_creation(host,db):
+    user=raw_input("Enter the username for creation and getting access on database "+ db +":   ")
+    passwd=raw_input("Enter the password need to set for the user "+ user +":  " )
+    conn = MySQLdb.connect(host=host,user='user',passwd='passwd',port=3311)
+    cur = conn.cursor()
+    query="CREATE USER '{0}'@'%' IDENTIFIED BY '{1}';".format(user,passwd)
+    cur.execute(query)
+    query="GRANT usage ON *.* TO '{0}'@'%';".format(user)
+    cur.execute(query)
+    query="grant all privileges on `{0}`.* TO '{1}'@'%';".format(db,user)
+    cur.execute(query)
+    query="update mysql.user set max_user_connections=70 where User='{0}';".format(user)
+    cur.execute(query)
+    query="flush privileges;"
+    cur.execute(query)
+    cur.close()
+    conn.close()
+
+
+
+def prod_migration():
+
+    global dumpfile
+    global user_sql
+    print "1  =Take Mysqldump backup from 5.6 production "
+    print "2  =Take user creation backup from 5.6 production"
+    print "3  =Create the database & import the backup in 5.7 production"
+    print "4  =create the user in 5.7 production"
+    print "5  =Exit the module"
+
+    user_response=raw_input("Please enter the option:  ")
+    if user_response == '1':
+        host="source host"
+        dumpfile=get_dump(db,host)
+        prod_migration()
+    elif user_response == '2':
+        host="source host"
+        user_sql=get_user_sql(db,host)
+        prod_migration()
+    elif user_response == '3':
+        host="target host"
+        response=raw_input("I am assuming you are restoring in 5.7 Production database " +db+ " with dumpfile " +dumpfile+ ". \n if details are correct enter yes or y else provide dumpfile name:  ").lower()
+        if response in ('y','yes'):
+            import_dump(db,dumpfile,host)
+            prod_migration()
+        else:
+            dumpfile=raw_input("provide dumpfile name need to import in 5.7 production database " +db+  ":  ")
+            import_dump(db,dumpfile,host)
+            prod_migration()
+    elif user_response == '4':
+        host="target host"
+        response=raw_input("I am assuming you are creating user in 5.7 production database for database " +db+ " with file " +user_sql+ ". \n if details are correct enter Y or yes. \n Incase you have password and want to create user with it enter C or create:  ").lower()
+        if response in ('y','yes'):
+            file=user_sql
+            user_creation(file,host)
+            prod_migration()
+        elif response in ('c','create'):
+            user_manual_creation(host,db)
+            prod_migration()
+    elif user_response == '5':
+        print "Coming out of program as per input provided"
+        sys.exit(0)
+    else:
+        print "You have provided invalid response"
+        prod_migration()
+
+def QA_migration():
+
+    global dumpfile
+    global user_sql
+
+
+    print "1  =Take Mysqldump backup from 5.6 QA "
+    print "2  =Take user creation backup from 5.6 QA"
+    print "3  =Create the database & import the backup in 5.7 QA"
+    print "4  =create the user in 5.7 QA"
+    print "5  =Exit the module"
+
+    user_response=raw_input("Please enter the option:  ")
+    if  user_response == '1':
+        host="source host"
+        dumpfile=get_dump(db,host)
+        QA_migration()
+    elif user_response == '2':
+        host="source host"
+        user_sql=get_user_sql(db,host)
+        QA_migration()
+    elif user_response == '3':
+        host="hostname"
+        response=raw_input("I am assuming you are restoring in 5.7 QA database " +db+ " with dumpfile " +dumpfile+ ".\n if details are correct enter yes or y else provide dumpfile name:  ").lower()
+        if response in ('y','yes'):
+
+            import_dump(db,dumpfile,host)
+            QA_migration()
+        else:
+            dumpfile=raw_input("provide dumpfile name need to import in 5.7 QA database " +db+ ":  ")
+            import_dump(db,dumpfile,host)
+            QA_migration()
+    elif user_response == '4':
+        host="hostname"
+        response=raw_input("I am assuming you are creating user in 5.7 QA database for database " +db+ " with file " +user_sql+ ". \n if details are correct enter Y or yes. \n Incase you have password and want to create user with it enter C or create:  ").lower()
+        if response in ('y','yes'):
+            file=user_sql
+            user_creation(file,host)
+            QA_migration()
+        elif response in ('c','create'):
+            user_manual_creation(host,db)
+            QA_migration()
+    elif user_response == '5':
+        print "Coming out of program as per input provided"
+        sys.exit(0)
+    else:
+        print "You have provided invalid response"
+        QA_migration()
+
+def main():
+    global env
+    env=raw_input("Please enter QA for QA migration or Prod for production: ").lower()
+    print  'Your response is :' ,env
+    global db
+
+    if (env in ('qa')):
+
+
+        db=raw_input("Please enter the database name need to migrate from 5.6 to 5.7 in QA environment:  ")
+        QA_migration()
+
+    elif (env in ('prod','production')):
+
+        db=raw_input("Please enter the database name need to migrate from 5.6 to 5.7 in Production environment:  ")
+        prod_migration()
+
+    else:
+        print "you have provide invalid respone"
+        main()
+
+
+if __name__=="__main__":
+    main()
